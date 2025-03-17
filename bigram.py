@@ -5,14 +5,14 @@ import torch.optim.adamw
 
 
 # Hyperparameters
-BATCH_SIZE = 32 # how many independent sentences will we process in parallel?
-BLOCK_SIZE = 8 # what is the maximum context length for predictions?
-MAX_ITERS = 3000
-EVAL_INTERVAL = 300
-LEARNING_RATE = 1e-2
+batch_size = 32  # how many independent sentences will we process in parallel?
+block_size = 8  # what is the maximum context length for predictions?
+max_iters = 3000
+eval_interval = 300
+learning_rate = 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-EVAL_ITERS = 200
-
+eval_iters = 200
+n_embed = 32
 
 torch.manual_seed(1337)
 
@@ -21,8 +21,8 @@ with open('data/input.txt', encoding='utf-8') as f:
 
 # Here are all the unique characters that occur in the text
 chars = sorted(list(set(text)))
-stoi = { ch: i for i, ch in enumerate(chars)} 
-itos = { i: ch for i, ch in enumerate(chars)}
+stoi = {ch: i for i, ch in enumerate(chars)} 
+itos = {i: ch for i, ch in enumerate(chars)}
 encode = lambda s: [stoi[ch] for ch in s]
 decode = lambda l: ''.join(itos[ix] for ix in l)
 vocab_size = len(stoi)
@@ -38,20 +38,26 @@ val_data = data[n:]
 def get_batch(split):
     # this function averages the loss over muliple batches
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(data.shape[0] - BLOCK_SIZE, (BATCH_SIZE, ))
-    xb = torch.stack([data[i:i+BLOCK_SIZE] for i in ix])
-    yb = torch.stack([data[i+1:i+BLOCK_SIZE+1] for i in ix])
+    ix = torch.randint(data.shape[0] - block_size, (batch_size, ))
+    xb = torch.stack([data[i:i + block_size] for i in ix])
+    yb = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
     xb, yb = xb.to(device), yb.to(device)
     return xb, yb
 
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
-        self.token_embedding_table  = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(block_size, vocab_size)
+        self.lm_head = nn.Linear(n_embed, vocab_size)
     
     def forward(self, idx, targets=None):
-        logits = self.token_embedding_table(idx) # (B, T, C)
+        B, T = idx.shape
+        token_emb = self.token_embedding_table(idx)  # (B, T, C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
+        x = token_emb + pos_emb   # (B, T, C)
+        logits = self.lm_head(x)  # (B, T, vocab_size) 
         if targets is None:
             loss = None
         else:
@@ -71,14 +77,14 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-@torch.no_grad() # by using this context manager, pytorch will be a lot more efficient in terms of memory since it doesn't have to store all of the intermediate variables
+@torch.no_grad()  # by using this context manager, pytorch will be a lot more efficient in terms of memory since it doesn't have to store all of the intermediate variables
 def estimate_loss():
     # averages up the loss over multiple batches
     out = {}
     model.eval()
     for split in ['train', 'eval']:
-        losses = torch.zeros(EVAL_ITERS)
-        for k in range(EVAL_ITERS):
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
             X, Y = get_batch(split)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -88,12 +94,12 @@ def estimate_loss():
     return out
 
 
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for iter in range(MAX_ITERS):
-    if iter % EVAL_INTERVAL == 0:
+for iter in range(max_iters):
+    if iter % eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['eval']:.4f}")
     
