@@ -9,7 +9,7 @@ batch_size = 32  # how many independent sentences will we process in parallel?
 block_size = 8  # what is the maximum context length for predictions?
 max_iters = 3000
 eval_interval = 300
-learning_rate = 1e-2
+learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embed = 32
@@ -45,31 +45,57 @@ def get_batch(split):
     return xb, yb
 
 
+class Head(nn.Module):
+    """One head of self-attention."""
+    def __init__(self, head_size):
+        super().__init__()
+        self.query = nn.Linear(n_embed, head_size, bias=False)
+        self.key = nn.Linear(n_embed, head_size, bias=False)
+        self.value = nn.Linear(n_embed, head_size, bias=False)
+        # tril is not a parameter of the module
+        self.register_buffer('tril', torch.tril(torch.ones((block_size, block_size))))
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)  # (B, T, C)
+        q = self.query(x)  # (B, T, C)
+        wei = q @ k.transpose(-2, -1) * C ** -0.5  # (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        v = self.value(x)  # (B, T, C)
+        out = wei @ v  # (B, T, C)
+        return out 
+    
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(block_size, vocab_size)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
-    
+        self.sa_head = Head(n_embed)
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         token_emb = self.token_embedding_table(idx)  # (B, T, C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = token_emb + pos_emb   # (B, T, C)
+        x = self.sa_head(x)  # (B, T, C) 
         logits = self.lm_head(x)  # (B, T, vocab_size) 
         if targets is None:
             loss = None
         else:
             B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
+            logits = logits.view(B * T, C)
+            targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
         return logits, loss
     
     def generate(self, idx, max_tokens=1000):
         for _ in range(max_tokens):
-            logits, loss = self(idx)
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -block_size:]
+            logits, loss = self(idx_cond)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             next_index = torch.multinomial(probs, num_samples=1)
@@ -111,6 +137,9 @@ for iter in range(max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+
+
+
 
 
 # generate from the model
